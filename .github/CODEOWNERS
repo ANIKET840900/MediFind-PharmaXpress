@@ -1,0 +1,8 @@
+# Require code owner review for all files.
+# Replace @your-github-username with your real GitHub handle.
+* @your-github-username
+
+# Optional tighter ownership by area (uncomment when needed):
+# /backend/ @your-github-username
+# /frontend/ @your-github-username
+# /.github/ @your-github-username
