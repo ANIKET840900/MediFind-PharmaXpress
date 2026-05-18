@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # MediFind-PharmaXpress
 
 A full-stack healthcare e-commerce platform for medicine delivery with seller management, payment processing, and order tracking.
@@ -629,3 +630,6 @@ For issues or questions:
 **Status**: ✅ **PRODUCTION READY FOR TESTING**
 
 Happy coding! 🚀
+=======
+# MediFind-PharmaXpress
+>>>>>>> aef6495430c70fbcca7a8c1ac977dc1a2f6cde78
