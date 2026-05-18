@@ -6,13 +6,11 @@ import Home from "./pages/Home";
 import Search from "./pages/Search";
 import Cart from "./pages/Cart";
 import Profile from "./pages/Profile";
-import ShopRegister from "./pages/ShopRegister";
 import Orders from "./pages/Orders";
 import MyMedicines from "./pages/MyMedicines";
 import Wishlist from "./pages/Wishlist";
 import MedicineDetails from "./pages/MedicineDetails";
 import Notifications from "./pages/Notifications";
-import SellerOperations from "./pages/SellerOperations";
 import Payments from "./pages/Payments";
 import PaymentsOps from "./pages/PaymentsOps";
 import ForgotUsername from "./pages/ForgotUsername";
@@ -46,13 +44,11 @@ function AppShell() {
         <Route path="/search" element={<RequireAuth><Search /></RequireAuth>} />
         <Route path="/cart" element={<RequireAuth><Cart /></RequireAuth>} />
         <Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} />
-        <Route path="/shop-register" element={<RequireAuth><ShopRegister /></RequireAuth>} />
         <Route path="/my-medicines" element={<RequireAuth><MyMedicines /></RequireAuth>} />
         <Route path="/wishlist" element={<RequireAuth><Wishlist /></RequireAuth>} />
         <Route path="/notifications" element={<RequireAuth><Notifications /></RequireAuth>} />
         <Route path="/payments" element={<RequireAuth><Payments /></RequireAuth>} />
         <Route path="/payments-ops" element={<RequireAuth><PaymentsOps /></RequireAuth>} />
-        <Route path="/seller-ops" element={<RequireAuth><SellerOperations /></RequireAuth>} />
         <Route path="/medicine/:id" element={<RequireAuth><MedicineDetails /></RequireAuth>} />
         <Route path="/orders" element={<RequireAuth><Orders /></RequireAuth>} />
         <Route path="/login" element={<Login />} />

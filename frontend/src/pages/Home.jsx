@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, getAuthToken } from "../api";
+import { api } from "../api";
 
 const CATEGORY_KEYWORDS = {
   "Pain Relief": ["pain", "ibuprofen", "acetaminophen", "paracetamol", "diclofenac"],
@@ -98,7 +98,6 @@ export default function Home() {
   const navigate = useNavigate();
   const [stats, setStats] = useState({ shops: 0, medicines: 0 });
   const [allDeals, setAllDeals] = useState([]);
-  const isLoggedIn = Boolean(getAuthToken());
 
   const effectiveDeals = allDeals;
   const spotlightDeals = effectiveDeals.slice(0, 4);
@@ -277,17 +276,6 @@ export default function Home() {
             </button>
           ))}
         </section>
-
-        {!isLoggedIn && (
-          <div className="hero-card">
-            <h2>Explore Medicines Instantly</h2>
-            <p>Search trusted medicines, compare stores, and browse products in one place.</p>
-            <div className="hero-buttons">
-              <button onClick={() => navigate("/search")} className="btn-hero">Search Medicines</button>
-              <button onClick={() => navigate("/home")} className="btn-hero btn-primary">Browse Home</button>
-            </div>
-          </div>
-        )}
 
         <section className="market-hero-strip">
           {heroShowcaseDeals.map((deal, index) => (

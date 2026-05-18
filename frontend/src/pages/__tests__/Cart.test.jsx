@@ -91,8 +91,6 @@ describe("Cart", () => {
         },
       })
       .mockResolvedValueOnce({});
-    api.delete.mockResolvedValue({});
-
     render(<Cart />);
 
     expect(await screen.findByText("Paracetamol")).toBeInTheDocument();
@@ -135,8 +133,9 @@ describe("Cart", () => {
       });
     });
     await waitFor(() => {
-      expect(api.delete).toHaveBeenCalledWith("/cart/1/");
+      expect(api.get).toHaveBeenCalledTimes(2);
     });
+    expect(api.delete).not.toHaveBeenCalled();
     expect(await screen.findByText(/order placed successfully/i)).toBeInTheDocument();
   });
 });

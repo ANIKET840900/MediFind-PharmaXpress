@@ -2,10 +2,72 @@ import { useEffect, useRef, useState } from "react";
 import { api, getAuthToken } from "../api";
 import MedicineCard from "../components/MedicineCard";
 
-const LOCATION_HELP_URL = "https://support.microsoft.com/en-us/microsoft-edge/website-wants-to-use-your-location-in-microsoft-edge-24facc98-4866-4584-9ca2-7a1f262f4eec";
+const GEO_OPTIONS_HIGH_ACCURACY = {
+  enableHighAccuracy: true,
+  timeout: 15000,
+  maximumAge: 0,
+};
+const GEO_OPTIONS_BALANCED = {
+  enableHighAccuracy: false,
+  timeout: 30000,
+  maximumAge: 15000,
+};
+
+function distanceMeters(lat1, lon1, lat2, lon2) {
+  const toRad = (value) => (value * Math.PI) / 180;
+  const earthRadius = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadius * c;
+}
+
+function pickAreaName(address = {}) {
+  return (
+    address.suburb ||
+    address.neighbourhood ||
+    address.city_district ||
+    address.town ||
+    address.village ||
+    address.hamlet ||
+    address.city ||
+    ""
+  );
+}
+
+function normalizeLocationDetails(details = {}) {
+  const safe = {
+    area: details.area || "",
+    district: details.district || "",
+    state: details.state || "",
+    country: details.country || "",
+  };
+  const segments = [
+    safe.area ? `Area: ${safe.area}` : "",
+    safe.district ? `District: ${safe.district}` : "",
+    safe.state ? `State: ${safe.state}` : "",
+    safe.country ? `Country: ${safe.country}` : "",
+  ].filter(Boolean);
+  return { ...safe, label: segments.join(" • ") };
+}
+
+function canUseGeolocationInCurrentContext() {
+  if (window.isSecureContext) {
+    return true;
+  }
+
+  const host = window.location?.hostname || "";
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
 
 export default function ShopRegister() {
   const watchIdRef = useRef(null);
+  const triedBalancedLiveRef = useRef(false);
+  const lastResolvedLocationRef = useRef({ lat: null, lng: null, at: 0 });
+  const isResolvingPlaceRef = useRef(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [name, setName] = useState("");
   const [area, setArea] = useState("");
@@ -21,7 +83,8 @@ export default function ShopRegister() {
   const [isLocating, setIsLocating] = useState(false);
   const [isLiveTracking, setIsLiveTracking] = useState(false);
   const [locationHint, setLocationHint] = useState("Auto-fill shop latitude and longitude from your device location.");
-  const [copyStatus, setCopyStatus] = useState("");
+  const [locationAccuracy, setLocationAccuracy] = useState(null);
+  const [locationDetails, setLocationDetails] = useState(() => normalizeLocationDetails());
   const [shops, setShops] = useState([]);
   const [selectedShopId, setSelectedShopId] = useState("");
   const [medicines, setMedicines] = useState([]);
@@ -47,6 +110,65 @@ export default function ShopRegister() {
     setMedicineRequiresPrescription(false);
     setMedicinePrice("");
     setMedicineInStock(true);
+  };
+
+  const resolvePlaceFromCoordinates = async (lat, lng, { force = false } = {}) => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return;
+    }
+
+    const previous = lastResolvedLocationRef.current;
+    const movedMeters =
+      previous.lat == null || previous.lng == null
+        ? Infinity
+        : distanceMeters(previous.lat, previous.lng, lat, lng);
+    const ageMs = Date.now() - (previous.at || 0);
+    const shouldRefresh = force || previous.lat == null || movedMeters > 45 || ageMs > 45000;
+
+    if (!shouldRefresh || isResolvingPlaceRef.current) {
+      return;
+    }
+
+    isResolvingPlaceRef.current = true;
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+        lat
+      )}&lon=${encodeURIComponent(lng)}&zoom=18&addressdetails=1`;
+      const response = await fetch(url, {
+        headers: {
+          "Accept-Language": "en",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error("reverse geocoding unavailable");
+      }
+
+      const payload = await response.json();
+      const address = payload.address || {};
+      const normalized = normalizeLocationDetails({
+        area: pickAreaName(address),
+        district: address.county || address.state_district || address.district || "",
+        state: address.state || address.region || "",
+        country: address.country || "",
+      });
+
+      setLocationDetails(normalized);
+      if (normalized.area && !area.trim()) {
+        setArea(normalized.area);
+      }
+      if (normalized.state && !state.trim()) {
+        setState(normalized.state);
+      }
+      if (normalized.label) {
+        setLocationHint(`Detected location: ${normalized.label}`);
+      }
+      lastResolvedLocationRef.current = { lat, lng, at: Date.now() };
+    } catch (err) {
+      // Keep existing hint if reverse geocoding fails.
+    } finally {
+      isResolvingPlaceRef.current = false;
+    }
   };
 
   const loadData = async () => {
@@ -89,12 +211,16 @@ export default function ShopRegister() {
   }, []);
 
   const applyLocation = (position) => {
-    setLatitude(position.coords.latitude.toFixed(6));
-    setLongitude(position.coords.longitude.toFixed(6));
+    const lat = position.coords.latitude;
+    const lng = position.coords.longitude;
+    setLatitude(lat.toFixed(6));
+    setLongitude(lng.toFixed(6));
+    setLocationAccuracy(position.coords.accuracy || null);
     setLocationSource("gps");
     setLocationHint(
       `Location updated at ${new Date().toLocaleTimeString()}${position.coords.accuracy ? ` (±${Math.round(position.coords.accuracy)}m)` : ""}.`
     );
+    resolvePlaceFromCoordinates(lat, lng);
   };
 
   const fallbackLocationFromIp = async () => {
@@ -111,7 +237,16 @@ export default function ShopRegister() {
       }
       setLatitude(lat.toFixed(6));
       setLongitude(lng.toFixed(6));
+      setLocationAccuracy(null);
       setLocationSource("ip");
+      setLocationDetails(
+        normalizeLocationDetails({
+          area: data.city || "",
+          district: data.region || "",
+          state: data.region || "",
+          country: data.country_name || data.country || "",
+        })
+      );
       setLocationHint("Using approximate network location. Enable browser location permission for accurate live GPS.");
       return true;
     } catch (err) {
@@ -134,7 +269,7 @@ export default function ShopRegister() {
       return;
     }
 
-    if (!window.isSecureContext) {
+    if (!canUseGeolocationInCurrentContext()) {
       setError("Location requires a secure context (HTTPS or localhost).");
       fallbackLocationFromIp();
       return;
@@ -149,6 +284,29 @@ export default function ShopRegister() {
         setIsLocating(false);
       },
       (geoError) => {
+        if (geoError.code !== 1) {
+          navigator.geolocation.getCurrentPosition(
+            (balancedPosition) => {
+              applyLocation(balancedPosition);
+              setError("");
+              setLocationHint("Using balanced GPS mode for better stability.");
+              setIsLocating(false);
+            },
+            () => {
+              let message = "Unable to get your current location. You can enter coordinates manually.";
+              if (geoError.code === 1) message = "Location permission denied. Allow location permission and try again.";
+              if (geoError.code === 2) message = "Location unavailable. Check GPS/network and retry.";
+              if (geoError.code === 3) message = "Location request timed out. Please retry.";
+              setError(message);
+              setLocationHint("You can still enter latitude and longitude manually.");
+              setIsLocating(false);
+              fallbackLocationFromIp();
+            },
+            GEO_OPTIONS_BALANCED
+          );
+          return;
+        }
+
         let message = "Unable to get your current location. You can enter coordinates manually.";
         if (geoError.code === 1) message = "Location permission denied. Allow location permission and try again.";
         if (geoError.code === 2) message = "Location unavailable. Check GPS/network and retry.";
@@ -158,7 +316,7 @@ export default function ShopRegister() {
         setIsLocating(false);
         fallbackLocationFromIp();
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      GEO_OPTIONS_HIGH_ACCURACY
     );
   };
 
@@ -169,7 +327,7 @@ export default function ShopRegister() {
       return;
     }
 
-    if (!window.isSecureContext) {
+    if (!canUseGeolocationInCurrentContext()) {
       setError("Live location requires a secure context (HTTPS or localhost).");
       fallbackLocationFromIp();
       return;
@@ -180,43 +338,57 @@ export default function ShopRegister() {
     setIsLocating(true);
     setLocationHint("Starting live location updates...");
 
-    watchIdRef.current = navigator.geolocation.watchPosition(
+    const onLiveLocationSuccess = (position) => {
+      applyLocation(position);
+      setError("");
+      setIsLocating(false);
+      setIsLiveTracking(true);
+      triedBalancedLiveRef.current = false;
+    };
+
+    const onLiveLocationError = (geoError) => {
+      if ((geoError.code === 2 || geoError.code === 3) && !triedBalancedLiveRef.current) {
+        triedBalancedLiveRef.current = true;
+        setError("");
+        setLocationHint("Live location is unstable. Switching to balanced GPS mode...");
+        if (watchIdRef.current != null) {
+          navigator.geolocation.clearWatch(watchIdRef.current);
+        }
+        watchIdRef.current = navigator.geolocation.watchPosition(
+          onLiveLocationSuccess,
+          onLiveLocationError,
+          GEO_OPTIONS_BALANCED
+        );
+        return;
+      }
+
+      let message = "Unable to start live location tracking.";
+      if (geoError.code === 1) message = "Location permission denied. Allow location permission and try again.";
+      if (geoError.code === 2) message = "Live location unavailable. Check GPS/network.";
+      if (geoError.code === 3) message = "Live location timed out. Please retry.";
+      setError(message);
+      setIsLocating(false);
+      setIsLiveTracking(false);
+      triedBalancedLiveRef.current = false;
+      setLocationHint("You can still use one-time current location or enter coordinates manually.");
+      fallbackLocationFromIp();
+    };
+
+    // Acquire a first fix immediately, then keep watching for live updates.
+    navigator.geolocation.getCurrentPosition(
       (position) => {
-        applyLocation(position);
-        setIsLocating(false);
-        setIsLiveTracking(true);
+        onLiveLocationSuccess(position);
+        watchIdRef.current = navigator.geolocation.watchPosition(
+          onLiveLocationSuccess,
+          onLiveLocationError,
+          GEO_OPTIONS_HIGH_ACCURACY
+        );
       },
       (geoError) => {
-        let message = "Unable to start live location tracking.";
-        if (geoError.code === 1) message = "Location permission denied. Allow location permission and try again.";
-        if (geoError.code === 2) message = "Live location unavailable. Check GPS/network.";
-        if (geoError.code === 3) message = "Live location timed out. Please retry.";
-        setError(message);
-        setIsLocating(false);
-        setIsLiveTracking(false);
-        setLocationHint("You can still use one-time current location or enter coordinates manually.");
-        fallbackLocationFromIp();
+        onLiveLocationError(geoError);
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      GEO_OPTIONS_HIGH_ACCURACY
     );
-  };
-
-  const copyCoordinates = async () => {
-    if (!latitude || !longitude) {
-      setCopyStatus("No coordinates to copy");
-      setTimeout(() => setCopyStatus(""), 2500);
-      return;
-    }
-
-    const text = `${Number(latitude).toFixed(6)}, ${Number(longitude).toFixed(6)}`;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopyStatus("Copied");
-      setTimeout(() => setCopyStatus(""), 1000);
-    } catch (err) {
-      setCopyStatus("Copy failed");
-      setTimeout(() => setCopyStatus(""), 2500);
-    }
   };
 
   const createShop = async (e) => {
@@ -344,13 +516,11 @@ export default function ShopRegister() {
           : locationMode === "locating"
             ? "Locating"
             : "Location off";
-  const copyStatusClass =
-    copyStatus === "Copied"
-      ? "is-success"
-      : copyStatus === "Copy failed"
-        ? "is-error"
-        : "is-info";
-
+      const locationText = locationDetails.label
+        ? locationDetails.label
+        : latitude && longitude
+          ? `Lat ${Number(latitude).toFixed(5)}, Lng ${Number(longitude).toFixed(5)}`
+          : "Use current/live location to auto-fill shop latitude and longitude.";
   return (
     <div className="page">
       <div className="page-header">
@@ -365,27 +535,9 @@ export default function ShopRegister() {
             {error && error.toLowerCase().includes("location")
               ? error
               : latitude && longitude
-                ? `Lat ${Number(latitude).toFixed(5)}, Lng ${Number(longitude).toFixed(5)}${locationSource === "ip" ? " • Approximate" : ""}`
-                : "Use current/live location to auto-fill shop latitude and longitude."}
+                ? `${locationText}${locationSource === "ip" ? " • Approximate" : ""}${locationAccuracy ? ` • ±${Math.round(locationAccuracy)}m` : ""}`
+                : locationText}
           </span>
-        </div>
-        <div className="location-banner-actions">
-          <button
-            type="button"
-            className="btn-copy-coords"
-            onClick={copyCoordinates}
-            disabled={!latitude || !longitude}
-          >
-            {copyStatus === "Copied" ? "Copied" : "Copy coordinates"}
-          </button>
-          {copyStatus && (
-            <span className={`location-copy-status ${copyStatusClass}`} aria-live="polite">
-              {copyStatus}
-            </span>
-          )}
-          <a className="location-banner-link" href={LOCATION_HELP_URL} target="_blank" rel="noreferrer">
-            Open browser location settings help
-          </a>
         </div>
       </div>
 

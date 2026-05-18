@@ -111,9 +111,6 @@ export default function Cart() {
         state: stateName.trim(),
         pincode: pincode.trim(),
       });
-      for (const item of items) {
-        await api.delete(`/cart/${item.id}/`);
-      }
       setMessage("✓ Order placed successfully!");
       setMobileNumber("");
       setHouseNumber("");

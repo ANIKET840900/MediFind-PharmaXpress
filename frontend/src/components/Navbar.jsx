@@ -11,14 +11,10 @@ export default function Navbar() {
     { to: "/home", icon: "⌂", label: "Home", end: true },
     { to: "/search", icon: "🔎", label: "Search Medicines" },
     { to: "/orders", icon: "✦", label: "My Orders" },
-    { to: "/payments", icon: "₹", label: "Payment Status" },
-    { to: "/payments-ops", icon: "⚙", label: "Payments Ops" },
     { to: "/cart", icon: "♡", label: "My Cart" },
     { to: "/wishlist", icon: "❤", label: "Wishlist" },
     { to: "/notifications", icon: "🔔", label: "Notifications" },
-    { to: "/seller-ops", icon: "🛠", label: "Seller Ops" },
     { to: "/my-medicines", icon: "🎁", label: "My Medicines" },
-    { to: "/shop-register", icon: "🏪", label: "Register a Shop" },
     { to: "/profile", icon: "👤", label: "My Profile" },
   ];
 

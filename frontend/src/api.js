@@ -1,12 +1,29 @@
 import axios from "axios";
 
 const TOKEN_KEY = "medcompare_token";
+const LOCAL_BACKEND_BASE_URL = "http://localhost:8080/api";
 const AUTH_FREE_ENDPOINTS = [
 	"/auth/login/",
 	"/auth/signup/",
 	"/auth/forgot-username/",
 	"/auth/forgot-password/",
 ];
+
+const resolveBaseURL = () => {
+	const envBaseUrl = process.env.REACT_APP_API_BASE_URL?.trim();
+	if (envBaseUrl) {
+		return envBaseUrl.replace(/\/$/, "");
+	}
+
+	if (typeof window !== "undefined") {
+		const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+		if (localHosts.has(window.location.hostname)) {
+			return LOCAL_BACKEND_BASE_URL;
+		}
+	}
+
+	return "/api";
+};
 
 const normalizeToken = (token) => {
 	if (!token || typeof token !== "string") {
@@ -33,7 +50,7 @@ export const clearAuthToken = () => {
 };
 
 export const api = axios.create({
-	baseURL: process.env.REACT_APP_API_BASE_URL || "/api",
+	baseURL: resolveBaseURL(),
 });
 
 api.interceptors.request.use((config) => {

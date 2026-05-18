@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, getAuthToken } from "../api";
 import MedicineCard from "../components/MedicineCard";
+import LocationMapModal from "../components/LocationMapModal";
 
 const HIDDEN_NEARBY_RANGE_KM = 20;
 
@@ -14,12 +15,70 @@ const QUICK_SEARCHES = [
   "Nebulizer",
 ];
 
-const LOCATION_HELP_URL = "https://support.microsoft.com/en-us/microsoft-edge/website-wants-to-use-your-location-in-microsoft-edge-24facc98-4866-4584-9ca2-7a1f262f4eec";
+const GEO_OPTIONS_HIGH_ACCURACY = {
+  enableHighAccuracy: true,
+  timeout: 15000,
+  maximumAge: 0,
+};
+const GEO_OPTIONS_BALANCED = {
+  enableHighAccuracy: false,
+  timeout: 30000,
+  maximumAge: 15000,
+};
+
+function distanceMeters(lat1, lon1, lat2, lon2) {
+  const toRad = (value) => (value * Math.PI) / 180;
+  const earthRadius = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadius * c;
+}
+
+  function haversineKm(lat1, lon1, lat2, lon2) {
+    return distanceMeters(lat1, lon1, lat2, lon2) / 1000;
+  }
+
+function pickAreaName(address = {}) {
+  return (
+    address.suburb ||
+    address.neighbourhood ||
+    address.city_district ||
+    address.town ||
+    address.village ||
+    address.hamlet ||
+    address.city ||
+    ""
+  );
+}
+
+function normalizeLocationDetails(details = {}) {
+  const safe = {
+    area: details.area || "",
+    district: details.district || "",
+    state: details.state || "",
+    country: details.country || "",
+  };
+  const segments = [
+    safe.area ? `Area: ${safe.area}` : "",
+    safe.district ? `District: ${safe.district}` : "",
+    safe.state ? `State: ${safe.state}` : "",
+    safe.country ? `Country: ${safe.country}` : "",
+  ].filter(Boolean);
+  return { ...safe, label: segments.join(" • ") };
+}
 
 export default function Search() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const watchIdRef = useRef(null);
+  const triedBalancedLiveRef = useRef(false);
+  const lastResolvedLocationRef = useRef({ lat: null, lng: null, at: 0 });
+  const isResolvingPlaceRef = useRef(false);
+  const requestCurrentLocationRef = useRef(null);
   const [query, setQuery] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const [meds, setMeds] = useState([]);
@@ -31,8 +90,7 @@ export default function Search() {
   const [sort, setSort] = useState("");
   const [category, setCategory] = useState("");
   const [brand, setBrand] = useState("");
-  const [minPrice, setMinPrice] = useState("");
-  const [maxPrice, setMaxPrice] = useState("");
+  const [price, setPrice] = useState("");
   const [minRating, setMinRating] = useState("");
   const [userLocation, setUserLocation] = useState(null);
   const [locationError, setLocationError] = useState("");
@@ -41,7 +99,59 @@ export default function Search() {
   const [nearbyOnly, setNearbyOnly] = useState(false);
   const [lastLocationUpdate, setLastLocationUpdate] = useState(null);
   const [locationSource, setLocationSource] = useState("");
-  const [copyStatus, setCopyStatus] = useState("");
+  const [locationDetails, setLocationDetails] = useState(() => normalizeLocationDetails());
+  const [isMapModalOpen, setIsMapModalOpen] = useState(false);
+
+  const resolvePlaceFromCoordinates = async (lat, lng, { force = false } = {}) => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return;
+    }
+
+    const previous = lastResolvedLocationRef.current;
+    const movedMeters =
+      previous.lat == null || previous.lng == null
+        ? Infinity
+        : distanceMeters(previous.lat, previous.lng, lat, lng);
+    const ageMs = Date.now() - (previous.at || 0);
+    const shouldRefresh = force || previous.lat == null || movedMeters > 45 || ageMs > 45000;
+
+    if (!shouldRefresh || isResolvingPlaceRef.current) {
+      return;
+    }
+
+    isResolvingPlaceRef.current = true;
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+        lat
+      )}&lon=${encodeURIComponent(lng)}&zoom=18&addressdetails=1`;
+      const response = await fetch(url, {
+        headers: {
+          "Accept-Language": "en",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error("reverse geocoding unavailable");
+      }
+
+      const payload = await response.json();
+      const address = payload.address || {};
+      const normalized = normalizeLocationDetails({
+        area: pickAreaName(address),
+        district: address.county || address.state_district || address.district || "",
+        state: address.state || address.region || "",
+        country: address.country || "",
+      });
+      if (normalized.label) {
+        setLocationDetails(normalized);
+      }
+      lastResolvedLocationRef.current = { lat, lng, at: Date.now() };
+    } catch (err) {
+      // Keep last resolved place if reverse geocoding fails.
+    } finally {
+      isResolvingPlaceRef.current = false;
+    }
+  };
 
   const fallbackLocationFromIp = async () => {
     try {
@@ -57,6 +167,14 @@ export default function Search() {
       }
       setUserLocation({ latitude: lat, longitude: lng, accuracy: null });
       setLocationSource("ip");
+      setLocationDetails(
+        normalizeLocationDetails({
+          area: data.city || "",
+          district: data.region || "",
+          state: data.region || "",
+          country: data.country_name || data.country || "",
+        })
+      );
       setLastLocationUpdate(new Date());
       setLocationError("Using approximate location from network. Enable location permission for accurate live GPS.");
       return true;
@@ -75,7 +193,7 @@ export default function Search() {
     if (page > 1) {
       search(page);
     }
-  }, [page, sort, category, brand, minPrice, maxPrice, minRating]);
+  }, [page, sort, category, brand, price, minRating]);
 
   useEffect(() => {
     if (!userLocation) {
@@ -117,14 +235,17 @@ export default function Search() {
   };
 
   const updateLocationState = (position) => {
+    const latitude = position.coords.latitude;
+    const longitude = position.coords.longitude;
     setUserLocation({
-      latitude: position.coords.latitude,
-      longitude: position.coords.longitude,
+      latitude,
+      longitude,
       accuracy: position.coords.accuracy,
     });
     setLocationSource("gps");
     setLastLocationUpdate(new Date());
     setLocationError("");
+    resolvePlaceFromCoordinates(latitude, longitude);
   };
 
   const requestCurrentLocation = () => {
@@ -149,6 +270,27 @@ export default function Search() {
         setIsLocating(false);
       },
       (geoError) => {
+        if (geoError.code !== 1) {
+          navigator.geolocation.getCurrentPosition(
+            (balancedPosition) => {
+              updateLocationState(balancedPosition);
+              setLocationError("Using balanced GPS mode for more stable location updates.");
+              setIsLocating(false);
+            },
+            () => {
+              let message = "Unable to access your current location.";
+              if (geoError.code === 1) message = "Location permission denied. Allow location access and try again.";
+              if (geoError.code === 2) message = "Location is unavailable right now. Please check GPS/network and retry.";
+              if (geoError.code === 3) message = "Location request timed out. Please retry.";
+              setLocationError(message);
+              setIsLocating(false);
+              fallbackLocationFromIp();
+            },
+            GEO_OPTIONS_BALANCED
+          );
+          return;
+        }
+
         let message = "Unable to access your current location.";
         if (geoError.code === 1) message = "Location permission denied. Allow location access and try again.";
         if (geoError.code === 2) message = "Location is unavailable right now. Please check GPS/network and retry.";
@@ -157,13 +299,11 @@ export default function Search() {
         setIsLocating(false);
         fallbackLocationFromIp();
       },
-      {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 0,
-      }
+      GEO_OPTIONS_HIGH_ACCURACY
     );
   };
+
+  requestCurrentLocationRef.current = requestCurrentLocation;
 
   const startLiveLocation = () => {
     if (!navigator.geolocation) {
@@ -182,46 +322,44 @@ export default function Search() {
     setLocationError("");
     setIsLocating(true);
 
-    watchIdRef.current = navigator.geolocation.watchPosition(
-      (position) => {
-        updateLocationState(position);
-        setIsLocating(false);
-        setIsLiveTracking(true);
-      },
-      (geoError) => {
-        let message = "Unable to start live location tracking.";
-        if (geoError.code === 1) message = "Location permission denied. Allow location access and try again.";
-        if (geoError.code === 2) message = "Live location is currently unavailable. Check GPS/network.";
-        if (geoError.code === 3) message = "Live location timed out. Please retry.";
-        setLocationError(message);
-        setIsLocating(false);
-        setIsLiveTracking(false);
-        fallbackLocationFromIp();
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 0,
+    const onLiveLocationSuccess = (position) => {
+      updateLocationState(position);
+      setIsLocating(false);
+      setIsLiveTracking(true);
+      triedBalancedLiveRef.current = false;
+    };
+
+    const onLiveLocationError = (geoError) => {
+      if ((geoError.code === 2 || geoError.code === 3) && !triedBalancedLiveRef.current) {
+        triedBalancedLiveRef.current = true;
+        setLocationError("Live location is unstable. Switching to balanced GPS mode...");
+        if (watchIdRef.current != null) {
+          navigator.geolocation.clearWatch(watchIdRef.current);
+        }
+        watchIdRef.current = navigator.geolocation.watchPosition(
+          onLiveLocationSuccess,
+          onLiveLocationError,
+          GEO_OPTIONS_BALANCED
+        );
+        return;
       }
+
+      let message = "Unable to start live location tracking.";
+      if (geoError.code === 1) message = "Location permission denied. Allow location access and try again.";
+      if (geoError.code === 2) message = "Live location is currently unavailable. Check GPS/network.";
+      if (geoError.code === 3) message = "Live location timed out. Please retry.";
+      setLocationError(message);
+      setIsLocating(false);
+      setIsLiveTracking(false);
+      triedBalancedLiveRef.current = false;
+      fallbackLocationFromIp();
+    };
+
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      onLiveLocationSuccess,
+      onLiveLocationError,
+      GEO_OPTIONS_HIGH_ACCURACY
     );
-  };
-
-  const copyCoordinates = async () => {
-    if (!userLocation) {
-      setCopyStatus("No coordinates to copy");
-      setTimeout(() => setCopyStatus(""), 2500);
-      return;
-    }
-
-    const text = `${userLocation.latitude.toFixed(6)}, ${userLocation.longitude.toFixed(6)}`;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopyStatus("Copied");
-      setTimeout(() => setCopyStatus(""), 1000);
-    } catch (err) {
-      setCopyStatus("Copy failed");
-      setTimeout(() => setCopyStatus(""), 2500);
-    }
   };
 
   useEffect(() => {
@@ -240,6 +378,20 @@ export default function Search() {
     requestCurrentLocation();
     return () => stopLiveLocation();
   }, []);
+
+  useEffect(() => {
+    if (!userLocation && !isLiveTracking) {
+      return;
+    }
+
+    const refreshTimer = window.setInterval(() => {
+      if (typeof requestCurrentLocationRef.current === "function") {
+        requestCurrentLocationRef.current();
+      }
+    }, 60000);
+
+    return () => window.clearInterval(refreshTimer);
+  }, [userLocation?.latitude, userLocation?.longitude, isLiveTracking]);
 
   const search = async (newPage = 1, forcedQuery = null, locationOverride = null) => {
     if (!getAuthToken()) {
@@ -271,8 +423,7 @@ export default function Search() {
       }
       if (category.trim()) params.category = category.trim();
       if (brand.trim()) params.brand = brand.trim();
-      if (minPrice) params.min_price = minPrice;
-      if (maxPrice) params.max_price = maxPrice;
+      if (price) params.max_price = price;
       if (minRating) params.min_rating = minRating;
       const res = await api.get("/medicines/", { params });
 
@@ -285,10 +436,9 @@ export default function Search() {
           radius_km: activeLocation && nearbyOnly ? HIDDEN_NEARBY_RANGE_KM : undefined,
           category: category.trim() || undefined,
           brand: brand.trim() || undefined,
-          min_price: minPrice || undefined,
-          max_price: maxPrice || undefined,
+          max_price: price || undefined,
           min_rating: minRating || undefined,
-          page_size: 50,
+          page_size: 300,
         },
       });
       
@@ -349,12 +499,73 @@ export default function Search() {
     search(1);
   };
 
+  const openMapModal = () => {
+    if (userLocation) {
+      setIsMapModalOpen(true);
+    } else {
+      setLocationError("Please enable location to view the map.");
+    }
+  };
+
   const normalizedQuery = query.trim().toLowerCase();
   const medicineNamedMatches = normalizedQuery
     ? allMatches.filter((m) => (m.name || "").toLowerCase().includes(normalizedQuery))
     : allMatches;
   const uniqueShopIds = new Set(medicineNamedMatches.map((m) => m.shop));
   const visibleMeds = meds;
+  const nearestShops = userLocation
+    ? Object.values(
+        allMatches.reduce((acc, medicine) => {
+          const shopKey = String(medicine.shop || medicine.shop_name || "");
+          if (!shopKey) {
+            return acc;
+          }
+
+          const hasCoords =
+            Number.isFinite(medicine.shop_latitude) && Number.isFinite(medicine.shop_longitude);
+          const distanceFromMedicine = Number.isFinite(medicine.distance_km)
+            ? Number(medicine.distance_km)
+            : Number.isFinite(medicine.distanceKm)
+              ? Number(medicine.distanceKm)
+              : null;
+          const computedDistance = hasCoords
+            ? haversineKm(
+                userLocation.latitude,
+                userLocation.longitude,
+                Number(medicine.shop_latitude),
+                Number(medicine.shop_longitude)
+              )
+            : null;
+          const distanceKm = distanceFromMedicine ?? computedDistance;
+
+          if (!Number.isFinite(distanceKm)) {
+            return acc;
+          }
+
+          const current = acc[shopKey];
+          if (!current || distanceKm < current.distanceKm) {
+            acc[shopKey] = {
+              id: medicine.shop,
+              name: medicine.shop_name || "Medical Shop",
+              area: medicine.shop_area || "Area unavailable",
+              state: medicine.shop_state || "State unavailable",
+              latitude: hasCoords ? Number(medicine.shop_latitude) : null,
+              longitude: hasCoords ? Number(medicine.shop_longitude) : null,
+              distanceKm,
+              topMedicineName: medicine.name || "",
+              photoUrl:
+                medicine.image_url ||
+                `https://picsum.photos/seed/shop-${encodeURIComponent(`${medicine.shop_name || "medical-shop"}-${medicine.shop || "0"}`)}/500/280`,
+            };
+          }
+
+          return acc;
+        }, {})
+      )
+        .sort((a, b) => a.distanceKm - b.distanceKm)
+        .slice(0, nearbyOnly ? undefined : 8)
+    : [];
+  const shouldShowNearestShops = Boolean(userLocation) && nearestShops.length > 0;
   const locationMode = isLocating
     ? "locating"
     : isLiveTracking && locationSource === "gps"
@@ -374,13 +585,11 @@ export default function Search() {
           : locationMode === "locating"
             ? "Locating"
             : "Location off";
-  const copyStatusClass =
-    copyStatus === "Copied"
-      ? "is-success"
-      : copyStatus === "Copy failed"
-        ? "is-error"
-        : "is-info";
-
+      const locationText = locationDetails.label
+        ? locationDetails.label
+        : userLocation
+          ? `Lat ${userLocation.latitude.toFixed(5)}, Lng ${userLocation.longitude.toFixed(5)}`
+          : "Enable location to get accurate nearby sorting and route directions.";
   return (
     <div className="page">
       <section className="search-hero">
@@ -421,8 +630,7 @@ export default function Search() {
           </select>
           <input type="text" placeholder="Category" value={category} onChange={(e) => setCategory(e.target.value)} />
           <input type="text" placeholder="Brand" value={brand} onChange={(e) => setBrand(e.target.value)} />
-          <input type="number" placeholder="Min Price" value={minPrice} onChange={(e) => setMinPrice(e.target.value)} />
-          <input type="number" placeholder="Max Price" value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)} />
+          <input type="number" placeholder="Price" value={price} onChange={(e) => setPrice(e.target.value)} />
           <select value={minRating} onChange={(e) => setMinRating(e.target.value)}>
             <option value="">Any rating</option>
             <option value="3">3+ rating</option>
@@ -439,27 +647,9 @@ export default function Search() {
               {locationError
                 ? locationError
                 : userLocation
-                  ? `Lat ${userLocation.latitude.toFixed(5)}, Lng ${userLocation.longitude.toFixed(5)}${userLocation.accuracy ? ` • ±${Math.round(userLocation.accuracy)}m` : ""}`
-                  : "Enable location to get accurate nearby sorting and route directions."}
+                  ? `${locationText}${userLocation.accuracy ? ` • ±${Math.round(userLocation.accuracy)}m` : ""}`
+                  : locationText}
             </span>
-          </div>
-          <div className="location-banner-actions">
-            <button
-              type="button"
-              className="btn-copy-coords"
-              onClick={copyCoordinates}
-              disabled={!userLocation}
-            >
-              {copyStatus === "Copied" ? "Copied" : "Copy coordinates"}
-            </button>
-            {copyStatus && (
-              <span className={`location-copy-status ${copyStatusClass}`} aria-live="polite">
-                {copyStatus}
-              </span>
-            )}
-            <a className="location-banner-link" href={LOCATION_HELP_URL} target="_blank" rel="noreferrer">
-              Open browser location settings help
-            </a>
           </div>
         </div>
 
@@ -472,7 +662,7 @@ export default function Search() {
             ))}
           </div>
           <div className="search-meta-row">
-            <span>{[sort, category, brand, minPrice, maxPrice, minRating].filter(Boolean).length} filters active</span>
+            <span>{[sort, category, brand, price, minRating].filter(Boolean).length} filters active</span>
             <span>
               {userLocation
                 ? `Location active${isLiveTracking ? " (live)" : ""}${locationSource === "ip" ? " (approximate)" : ""}${nearbyOnly ? ` • Nearby only within ${HIDDEN_NEARBY_RANGE_KM} km` : ""}`
@@ -493,9 +683,14 @@ export default function Search() {
                 Start live location
               </button>
             ) : (
-              <button type="button" className="btn-location" onClick={stopLiveLocation}>
-                Stop live location
-              </button>
+              <>
+                <button type="button" className="btn-location" onClick={stopLiveLocation}>
+                  Stop live location
+                </button>
+                <button type="button" className="btn-location" onClick={openMapModal} disabled={!userLocation}>
+                  📍 View Map
+                </button>
+              </>
             )}
             <button
               type="button"
@@ -503,13 +698,13 @@ export default function Search() {
               onClick={() => setNearbyOnly((prev) => !prev)}
               disabled={!userLocation}
             >
-              {nearbyOnly ? "Showing nearby only" : "Show all distances"}
+              {nearbyOnly ? `Nearby only ON (${HIDDEN_NEARBY_RANGE_KM} km)` : "Show nearby only"}
             </button>
           </div>
           {locationError && <div className="location-hint">{locationError}</div>}
           {!locationError && userLocation && (
             <div className="location-hint">
-              {`Lat ${userLocation.latitude.toFixed(5)}, Lng ${userLocation.longitude.toFixed(5)}${locationSource === "ip" ? " • Approximate" : ""}${userLocation.accuracy ? ` • ±${Math.round(userLocation.accuracy)}m` : ""}${lastLocationUpdate ? ` • Updated ${lastLocationUpdate.toLocaleTimeString()}` : ""}`}
+              {`${locationDetails.label || `Lat ${userLocation.latitude.toFixed(5)}, Lng ${userLocation.longitude.toFixed(5)}`}${locationSource === "ip" ? " • Approximate" : ""}${userLocation.accuracy ? ` • ±${Math.round(userLocation.accuracy)}m` : ""}${lastLocationUpdate ? ` • Updated ${lastLocationUpdate.toLocaleTimeString()}` : ""}`}
             </div>
           )}
         </div>
@@ -529,6 +724,62 @@ export default function Search() {
             {uniqueShopIds.size} registered shop(s) have this medicine in current search results
             {userLocation && nearbyOnly ? ` within ${HIDDEN_NEARBY_RANGE_KM} km nearby coverage` : ""}
           </div>
+
+          {shouldShowNearestShops && (
+            <>
+              <div className="results-info results-info-highlight">
+                {`Nearest medical shops ${isLiveTracking ? "with live location" : "with current location"} (${nearestShops.length})${nearbyOnly ? ` • within ${HIDDEN_NEARBY_RANGE_KM} km` : ""}`}
+              </div>
+              <div className="medicine-grid">
+                {nearestShops.map((shop) => (
+                  <article
+                    key={String(shop.id || shop.name)}
+                    className="shop-card"
+                    onClick={() => launchQuickSearch(shop.name)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        launchQuickSearch(shop.name);
+                      }
+                    }}
+                  >
+                    <img className="medicine-thumb" src={shop.photoUrl} alt={shop.name} loading="lazy" />
+                    <div className="shop-header">
+                      <h3>{shop.name}</h3>
+                      <div className="shop-rating">{shop.distanceKm.toFixed(2)} km</div>
+                    </div>
+                    <p className="shop-area">📍 {shop.area}</p>
+                    <p className="shop-area">🗺️ {shop.state}</p>
+                    {shop.topMedicineName && <p className="shop-area">💊 {shop.topMedicineName}</p>}
+                    {shop.latitude != null && shop.longitude != null && userLocation && (
+                      <a
+                        className="btn-action btn-secondary"
+                        href={`https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(
+                          `${userLocation.latitude},${userLocation.longitude}`
+                        )}&destination=${encodeURIComponent(
+                          `${shop.latitude},${shop.longitude}`
+                        )}&travelmode=driving`}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        Open in Google Maps
+                      </a>
+                    )}
+                    <div className="shop-badge">Tap to search this shop</div>
+                  </article>
+                ))}
+              </div>
+            </>
+          )}
+
+          {nearbyOnly && userLocation && !shouldShowNearestShops && (
+            <div className="results-info results-info-highlight">
+              No nearby medical shops found within {HIDDEN_NEARBY_RANGE_KM} km for this medicine search.
+            </div>
+          )}
 
           <div className="medicine-grid">
             {visibleMeds.map((m) => (
@@ -582,6 +833,13 @@ export default function Search() {
           </div>
         )
       )}
+
+      <LocationMapModal
+        isOpen={isMapModalOpen}
+        onClose={() => setIsMapModalOpen(false)}
+        userLocation={userLocation}
+        nearbyShops={nearestShops}
+      />
     </div>
   );
 }
